@@ -61,7 +61,12 @@ def main(host, port):
             examples=["Find me the top 10 chinese restaurants in the US"],
         )
 
-        base_url = f"http://{host}:{port}"
+        # Use public URL when deployed (Railway sets RAILWAY_PUBLIC_DOMAIN)
+        railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN")
+        if railway_domain:
+            base_url = f"https://{railway_domain}"
+        else:
+            base_url = os.getenv("PUBLIC_URL") or f"http://{host}:{port}"
 
         agent_card = AgentCard(
             name="Restaurant Agent",
