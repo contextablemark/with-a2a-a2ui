@@ -61,17 +61,20 @@ def main(host, port):
             examples=["Find me the top 10 chinese restaurants in the US"],
         )
 
-        # Use public URL when deployed (Railway sets RAILWAY_PUBLIC_DOMAIN)
+        # agent_url: internal A2A endpoint (for agent card communication)
+        agent_url = f"http://{host}:{port}"
+
+        # public_url: for image URLs in responses (uses Railway domain when deployed)
         railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN")
         if railway_domain:
-            base_url = f"https://{railway_domain}"
+            public_url = f"https://{railway_domain}"
         else:
-            base_url = os.getenv("PUBLIC_URL") or f"http://{host}:{port}"
+            public_url = os.getenv("PUBLIC_URL") or agent_url
 
         agent_card = AgentCard(
             name="Restaurant Agent",
             description="This agent helps find restaurants based on user criteria.",
-            url=base_url,  # <-- Use base_url here
+            url=agent_url,
             version="1.0.0",
             default_input_modes=RestaurantAgent.SUPPORTED_CONTENT_TYPES,
             default_output_modes=RestaurantAgent.SUPPORTED_CONTENT_TYPES,
@@ -79,7 +82,7 @@ def main(host, port):
             skills=[skill],
         )
 
-        agent_executor = RestaurantAgentExecutor(base_url=base_url)
+        agent_executor = RestaurantAgentExecutor(base_url=public_url)
 
         request_handler = DefaultRequestHandler(
             agent_executor=agent_executor,
