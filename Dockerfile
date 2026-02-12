@@ -16,7 +16,12 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY a2ui_extension/ ./a2ui_extension/
 COPY agent/ ./agent/
-RUN uv sync
+RUN uv sync && \
+    uv run python -c "import jsonschema; print('jsonschema OK')"
+
+# Put the venv on PATH so we don't need 'uv run' at runtime
+ENV PATH="/app/.venv/bin:$PATH"
+ENV VIRTUAL_ENV="/app/.venv"
 
 # -- Node.js dependencies --
 COPY package.json package-lock.json ./
