@@ -2,8 +2,9 @@
 set -e
 
 echo "Starting Python A2A agent on port 10002..."
-# Run from /tmp so the /app/agent/ source dir doesn't shadow the installed package
-cd /tmp && python -m agent --host 0.0.0.0 --port 10002 &
+# Run from inside agent/ dir so sibling imports (agent.py, agent_executor.py) resolve
+# correctly — same as local 'uv run .' from agent/
+cd /app/agent && python __main__.py --host 0.0.0.0 --port 10002 &
 AGENT_PID=$!
 
 # Wait for the A2A agent to be ready
