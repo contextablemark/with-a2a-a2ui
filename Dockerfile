@@ -20,7 +20,7 @@ RUN uv sync
 
 # -- Node.js dependencies --
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --ignore-scripts
 
 # -- Application files --
 COPY ag-ui-server.mjs ./
