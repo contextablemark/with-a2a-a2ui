@@ -15,10 +15,19 @@
 import json
 import logging
 import os
+from collections import OrderedDict
 from collections.abc import AsyncIterable
-from typing import Any
+from typing import Any, Dict, Optional
 
 import jsonschema
+from a2a.types import (
+    AgentCapabilities,
+    AgentCard,
+    AgentSkill,
+    Part,
+    TextPart,
+)
+from google.adk.agents import run_config
 from google.adk.agents.llm_agent import LlmAgent
 from google.adk.artifacts import InMemoryArtifactService
 from google.adk.memory.in_memory_memory_service import InMemoryMemoryService
@@ -27,277 +36,356 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from prompt_builder import (
-    A2UI_SCHEMA,
-    RESTAURANT_UI_EXAMPLES,
+    ROLE_DESCRIPTION,
+    UI_DESCRIPTION,
     get_text_prompt,
-    get_ui_prompt,
 )
 from tools import get_restaurants
 
+from a2ui.a2a.extension import get_a2ui_agent_extension
+from a2ui.a2a.parts import parse_response_to_parts, stream_response_to_parts
+from a2ui.basic_catalog.provider import BasicCatalog
+from a2ui.parser.parser import parse_response
+from a2ui.schema.common_modifiers import remove_strict_validation
+from a2ui.schema.constants import (
+    A2UI_CLOSE_TAG,
+    A2UI_OPEN_TAG,
+    VERSION_0_8,
+    VERSION_0_9,
+)
+from a2ui.schema.manager import A2uiSchemaManager
+
 logger = logging.getLogger(__name__)
 
-AGENT_INSTRUCTION = """
-    You are a helpful restaurant finding assistant. Your goal is to help users find and book restaurants using a rich UI.
-
-    To achieve this, you MUST follow this logic:
-
-    1.  **For finding restaurants:**
-        a. You MUST call the `get_restaurants` tool. Extract the cuisine, location, and a specific number (`count`) of restaurants from the user's query (e.g., for "top 5 chinese places", count is 5).
-        b. After receiving the data, you MUST follow the instructions precisely to generate the final a2ui UI JSON, using the appropriate UI example from the `prompt_builder.py` based on the number of restaurants.
-
-    2.  **For booking a table (when you receive a query like 'USER_WANTS_TO_BOOK...'):**
-        a. You MUST use the appropriate UI example from `prompt_builder.py` to generate the UI, populating the `dataModelUpdate.contents` with the details from the user's query.
-
-    3.  **For confirming a booking (when you receive a query like 'User submitted a booking...'):**
-        a. You MUST use the appropriate UI example from `prompt_builder.py` to generate the confirmation UI, populating the `dataModelUpdate.contents` with the final booking details.
-"""
+# Examples are shipped alongside this module so they resolve regardless of CWD
+# (Railway starts the process from a tmp dir; see scripts/start-railway.sh).
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 class RestaurantAgent:
-    """An agent that finds restaurants based on user criteria."""
+    """An agent that finds restaurants based on user criteria.
+
+    Builds one schema manager and one ADK runner per supported A2UI version;
+    the active version is selected per request by the executor via the A2A
+    extension negotiation result.
+
+    base_url is split from agent_url for Railway: agent_card carries the
+    internal URL (how other A2A agents reach this one), while tool output
+    uses the public URL (where the browser/client fetches images).
+    """
 
     SUPPORTED_CONTENT_TYPES = ["text", "text/plain"]
 
-    def __init__(self, base_url: str, use_ui: bool = False):
-        self.base_url = base_url
-        self.use_ui = use_ui
-        self._agent = self._build_agent(use_ui)
+    def __init__(self, agent_url: str, public_url: str):
+        self.agent_url = agent_url
+        self.public_url = public_url
+        self._agent_name = "Restaurant Agent"
         self._user_id = "remote_agent"
-        self._runner = Runner(
-            app_name=self._agent.name,
-            agent=self._agent,
+        self._text_runner: Optional[Runner] = self._build_runner(
+            self._build_llm_agent()
+        )
+
+        self._schema_managers: Dict[str, A2uiSchemaManager] = {}
+        self._ui_runners: Dict[str, Runner] = {}
+        self._parsers: "OrderedDict[str, Any]" = OrderedDict()
+        self._max_parsers = 1000
+
+        for version in [VERSION_0_8, VERSION_0_9]:
+            schema_manager = self._build_schema_manager(version)
+            self._schema_managers[version] = schema_manager
+            agent = self._build_llm_agent(schema_manager)
+            self._ui_runners[version] = self._build_runner(agent)
+
+        self._agent_card = self._build_agent_card()
+
+    @property
+    def agent_card(self) -> AgentCard:
+        return self._agent_card
+
+    def _build_schema_manager(self, version: str) -> A2uiSchemaManager:
+        examples_path = os.path.join(_SCRIPT_DIR, "examples", version)
+        return A2uiSchemaManager(
+            version=version,
+            catalogs=[
+                BasicCatalog.get_config(
+                    version=version, examples_path=examples_path
+                )
+            ],
+            schema_modifiers=[remove_strict_validation],
+        )
+
+    def _build_agent_card(self) -> AgentCard:
+        extensions = [
+            get_a2ui_agent_extension(
+                version,
+                sm.accepts_inline_catalogs,
+                sm.supported_catalog_ids,
+            )
+            for version, sm in self._schema_managers.items()
+        ]
+
+        capabilities = AgentCapabilities(
+            streaming=True,
+            extensions=extensions,
+        )
+        skill = AgentSkill(
+            id="find_restaurants",
+            name="Find Restaurants Tool",
+            description=(
+                "Helps find restaurants based on user criteria"
+                " (e.g., cuisine, location)."
+            ),
+            tags=["restaurant", "finder"],
+            examples=["Find me the top 10 chinese restaurants in the US"],
+        )
+
+        return AgentCard(
+            name="Restaurant Agent",
+            description="This agent helps find restaurants based on user criteria.",
+            url=self.agent_url,
+            version="1.0.0",
+            default_input_modes=RestaurantAgent.SUPPORTED_CONTENT_TYPES,
+            default_output_modes=RestaurantAgent.SUPPORTED_CONTENT_TYPES,
+            capabilities=capabilities,
+            skills=[skill],
+        )
+
+    def _build_runner(self, agent: LlmAgent) -> Runner:
+        return Runner(
+            app_name=self._agent_name,
+            agent=agent,
             artifact_service=InMemoryArtifactService(),
             session_service=InMemorySessionService(),
             memory_service=InMemoryMemoryService(),
         )
 
-        # --- MODIFICATION: Wrap the schema ---
-        # Load the A2UI_SCHEMA string into a Python object for validation
-        try:
-            # First, load the schema for a *single message*
-            single_message_schema = json.loads(A2UI_SCHEMA)
-
-            # The prompt instructs the LLM to return a *list* of messages.
-            # Therefore, our validation schema must be an *array* of the single message schema.
-            self.a2ui_schema_object = {"type": "array", "items": single_message_schema}
-            logger.info(
-                "A2UI_SCHEMA successfully loaded and wrapped in an array validator."
-            )
-        except json.JSONDecodeError as e:
-            logger.error(f"CRITICAL: Failed to parse A2UI_SCHEMA: {e}")
-            self.a2ui_schema_object = None
-        # --- END MODIFICATION ---
-
     def get_processing_message(self) -> str:
         return "Finding restaurants that match your criteria..."
 
-    def _build_agent(self, use_ui: bool) -> LlmAgent:
+    def _build_llm_agent(
+        self, schema_manager: Optional[A2uiSchemaManager] = None
+    ) -> LlmAgent:
         """Builds the LLM agent for the restaurant agent."""
-        LITELLM_MODEL = os.getenv("LITELLM_MODEL", "gemini/gemini-2.5-flash")
+        litellm_model = os.getenv("LITELLM_MODEL", "gemini/gemini-2.5-flash")
 
-        if use_ui:
-            # Construct the full prompt with UI instructions, examples, and schema
-            instruction = AGENT_INSTRUCTION + get_ui_prompt(
-                self.base_url, RESTAURANT_UI_EXAMPLES
+        instruction = (
+            schema_manager.generate_system_prompt(
+                role_description=ROLE_DESCRIPTION,
+                ui_description=UI_DESCRIPTION,
+                include_schema=True,
+                include_examples=True,
+                validate_examples=True,
             )
-        else:
-            instruction = get_text_prompt()
+            if schema_manager
+            else get_text_prompt()
+        )
 
         return LlmAgent(
-            model=LiteLlm(model=LITELLM_MODEL),
+            model=LiteLlm(model=litellm_model),
             name="restaurant_agent",
             description="An agent that finds restaurants and helps book tables.",
             instruction=instruction,
             tools=[get_restaurants],
         )
 
-    async def stream(self, query, session_id) -> AsyncIterable[dict[str, Any]]:
-        session_state = {"base_url": self.base_url}
+    async def stream(
+        self, query, session_id, ui_version: Optional[str] = None
+    ) -> AsyncIterable[dict[str, Any]]:
+        # `base_url` lives in session state because tools.get_restaurants reads
+        # it from tool_context.state to rewrite image URLs to the Railway host.
+        session_state = {"base_url": self.public_url, "expression": "{expression}"}
 
-        session = await self._runner.session_service.get_session(
-            app_name=self._agent.name,
+        if ui_version:
+            runner = self._ui_runners[ui_version]
+            schema_manager = self._schema_managers[ui_version]
+            selected_catalog = (
+                schema_manager.get_selected_catalog() if schema_manager else None
+            )
+        else:
+            runner = self._text_runner
+            schema_manager = None
+            selected_catalog = None
+
+        session = await runner.session_service.get_session(
+            app_name=self._agent_name,
             user_id=self._user_id,
             session_id=session_id,
         )
         if session is None:
-            session = await self._runner.session_service.create_session(
-                app_name=self._agent.name,
+            session = await runner.session_service.create_session(
+                app_name=self._agent_name,
                 user_id=self._user_id,
                 state=session_state,
                 session_id=session_id,
             )
         elif "base_url" not in session.state:
-            session.state["base_url"] = self.base_url
+            session.state["base_url"] = self.public_url
 
-        # --- Begin: UI Validation and Retry Logic ---
-        max_retries = 1  # Total 2 attempts
+        max_retries = 1
         attempt = 0
         current_query_text = query
 
-        # Ensure schema was loaded
-        if self.use_ui and self.a2ui_schema_object is None:
+        if ui_version and (
+            not selected_catalog or not selected_catalog.catalog_schema
+        ):
             logger.error(
-                "--- RestaurantAgent.stream: A2UI_SCHEMA is not loaded. "
-                "Cannot perform UI validation. ---"
+                "--- RestaurantAgent.stream: A2UI catalog schema not loaded for"
+                f" version {ui_version}. Cannot perform UI validation. ---"
             )
             yield {
                 "is_task_complete": True,
-                "content": (
-                    "I'm sorry, I'm facing an internal configuration error with my UI components. "
-                    "Please contact support."
-                ),
+                "parts": [
+                    Part(
+                        root=TextPart(
+                            text=(
+                                "I'm sorry, I'm facing an internal configuration"
+                                " error with my UI components. Please contact"
+                                " support."
+                            )
+                        )
+                    )
+                ],
             }
             return
 
         while attempt <= max_retries:
             attempt += 1
             logger.info(
-                f"--- RestaurantAgent.stream: Attempt {attempt}/{max_retries + 1} "
-                f"for session {session_id} ---"
+                f"--- RestaurantAgent.stream: Attempt {attempt}/{max_retries + 1}"
+                f" for session {session_id} (ui_version={ui_version}) ---"
             )
 
             current_message = types.Content(
-                role="user", parts=[types.Part.from_text(text=current_query_text)]
+                role="user",
+                parts=[types.Part.from_text(text=current_query_text)],
             )
-            final_response_content = None
 
-            async for event in self._runner.run_async(
-                user_id=self._user_id,
-                session_id=session.id,
-                new_message=current_message,
-            ):
-                logger.info(f"Event from runner: {event}")
-                if event.is_final_response():
-                    if (
-                        event.content
-                        and event.content.parts
-                        and event.content.parts[0].text
-                    ):
-                        final_response_content = "\n".join(
-                            [p.text for p in event.content.parts if p.text]
-                        )
-                    break  # Got the final response, stop consuming events
+            full_content_list: list[str] = []
+
+            async def token_stream():
+                async for event in runner.run_async(
+                    user_id=self._user_id,
+                    session_id=session.id,
+                    run_config=run_config.RunConfig(
+                        streaming_mode=run_config.StreamingMode.SSE
+                    ),
+                    new_message=current_message,
+                ):
+                    if event.content and event.content.parts:
+                        for p in event.content.parts:
+                            if p.text:
+                                full_content_list.append(p.text)
+                                yield p.text
+
+            if selected_catalog:
+                from a2ui.parser.streaming import A2uiStreamParser
+
+                if session_id in self._parsers:
+                    self._parsers.move_to_end(session_id)
                 else:
-                    logger.info(f"Intermediate event: {event}")
-                    # Yield intermediate updates on every attempt
+                    self._parsers[session_id] = A2uiStreamParser(
+                        catalog=selected_catalog
+                    )
+                    if len(self._parsers) > self._max_parsers:
+                        self._parsers.popitem(last=False)
+
+                async for part in stream_response_to_parts(
+                    self._parsers[session_id],
+                    token_stream(),
+                ):
                     yield {
                         "is_task_complete": False,
-                        "updates": self.get_processing_message(),
+                        "parts": [part],
+                    }
+            else:
+                async for token in token_stream():
+                    yield {
+                        "is_task_complete": False,
+                        "updates": token,
                     }
 
-            if final_response_content is None:
-                logger.warning(
-                    f"--- RestaurantAgent.stream: Received no final response content from runner "
-                    f"(Attempt {attempt}). ---"
-                )
-                if attempt <= max_retries:
-                    current_query_text = (
-                        "I received no response. Please try again."
-                        f"Please retry the original request: '{query}'"
-                    )
-                    continue  # Go to next retry
-                else:
-                    # Retries exhausted on no-response
-                    final_response_content = "I'm sorry, I encountered an error and couldn't process your request."
-                    # Fall through to send this as a text-only error
+            final_response_content = "".join(full_content_list)
 
             is_valid = False
             error_message = ""
 
-            if self.use_ui:
+            if ui_version:
                 logger.info(
-                    f"--- RestaurantAgent.stream: Validating UI response (Attempt {attempt})... ---"
+                    "--- RestaurantAgent.stream: Validating UI response (Attempt"
+                    f" {attempt})... ---"
                 )
                 try:
-                    if "---a2ui_JSON---" not in final_response_content:
-                        raise ValueError("Delimiter '---a2ui_JSON---' not found.")
+                    response_parts = parse_response(final_response_content)
 
-                    text_part, json_string = final_response_content.split(
-                        "---a2ui_JSON---", 1
-                    )
-
-                    if not json_string.strip():
-                        raise ValueError("JSON part is empty.")
-
-                    json_string_cleaned = (
-                        json_string.strip().lstrip("```json").rstrip("```").strip()
-                    )
-
-                    if not json_string_cleaned:
-                        raise ValueError("Cleaned JSON string is empty.")
-
-                    # --- New Validation Steps ---
-                    # 1. Check if it's parsable JSON
-                    parsed_json_data = json.loads(json_string_cleaned)
-
-                    # 2. Check if it validates against the A2UI_SCHEMA
-                    # This will raise jsonschema.exceptions.ValidationError if it fails
-                    logger.info(
-                        "--- RestaurantAgent.stream: Validating against A2UI_SCHEMA... ---"
-                    )
-                    jsonschema.validate(
-                        instance=parsed_json_data, schema=self.a2ui_schema_object
-                    )
-                    # --- End New Validation Steps ---
-
-                    logger.info(
-                        f"--- RestaurantAgent.stream: UI JSON successfully parsed AND validated against schema. "
-                        f"Validation OK (Attempt {attempt}). ---"
-                    )
-                    is_valid = True
-
+                    for part in response_parts:
+                        if not part.a2ui_json:
+                            continue
+                        selected_catalog.validator.validate(part.a2ui_json)
+                        logger.info(
+                            "--- RestaurantAgent.stream: UI JSON validated against"
+                            f" schema (Attempt {attempt}). ---"
+                        )
+                        is_valid = True
                 except (
                     ValueError,
                     json.JSONDecodeError,
                     jsonschema.exceptions.ValidationError,
                 ) as e:
                     logger.warning(
-                        f"--- RestaurantAgent.stream: A2UI validation failed: {e} (Attempt {attempt}) ---"
+                        f"--- RestaurantAgent.stream: A2UI validation failed: {e}"
+                        f" (Attempt {attempt}) ---"
                     )
                     logger.warning(
-                        f"--- Failed response content: {final_response_content[:500]}... ---"
+                        "--- Failed response content:"
+                        f" {final_response_content[:500]}... ---"
                     )
                     error_message = f"Validation failed: {e}."
-
-            else:  # Not using UI, so text is always "valid"
+            else:
                 is_valid = True
 
             if is_valid:
                 logger.info(
-                    f"--- RestaurantAgent.stream: Response is valid. Sending final response (Attempt {attempt}). ---"
+                    "--- RestaurantAgent.stream: Response is valid. Sending final"
+                    f" response (Attempt {attempt}). ---"
                 )
-                logger.info(f"Final response: {final_response_content}")
+                final_parts = parse_response_to_parts(
+                    final_response_content, fallback_text="OK."
+                )
                 yield {
                     "is_task_complete": True,
-                    "content": final_response_content,
+                    "parts": final_parts,
                 }
-                return  # We're done, exit the generator
-
-            # --- If we're here, it means validation failed ---
+                return
 
             if attempt <= max_retries:
                 logger.warning(
-                    f"--- RestaurantAgent.stream: Retrying... ({attempt}/{max_retries + 1}) ---"
+                    "--- RestaurantAgent.stream: Retrying..."
+                    f" ({attempt}/{max_retries + 1}) ---"
                 )
-                # Prepare the query for the retry
                 current_query_text = (
-                    f"Your previous response was invalid. {error_message} "
-                    "You MUST generate a valid response that strictly follows the A2UI JSON SCHEMA. "
-                    "The response MUST be a JSON list of A2UI messages. "
-                    "Ensure the response is split by '---a2ui_JSON---' and the JSON part is well-formed. "
-                    f"Please retry the original request: '{query}'"
+                    f"Your previous response was invalid. {error_message} You"
+                    " MUST generate a valid response that strictly follows the"
+                    " A2UI JSON SCHEMA. The response MUST be a JSON list of"
+                    " A2UI messages. Ensure each JSON part is wrapped in"
+                    f" '{A2UI_OPEN_TAG}' and '{A2UI_CLOSE_TAG}' tags. Please"
+                    f" retry the original request: '{query}'"
                 )
-                # Loop continues...
 
-        # --- If we're here, it means we've exhausted retries ---
         logger.error(
-            "--- RestaurantAgent.stream: Max retries exhausted. Sending text-only error. ---"
+            "--- RestaurantAgent.stream: Max retries exhausted. Sending text-only"
+            " error. ---"
         )
         yield {
             "is_task_complete": True,
-            "content": (
-                "I'm sorry, I'm having trouble generating the interface for that request right now. "
-                "Please try again in a moment."
-            ),
+            "parts": [
+                Part(
+                    root=TextPart(
+                        text=(
+                            "I'm sorry, I'm having trouble generating the interface"
+                            " for that request right now. Please try again in a"
+                            " moment."
+                        )
+                    )
+                )
+            ],
         }
-        # --- End: UI Validation and Retry Logic ---

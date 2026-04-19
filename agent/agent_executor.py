@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import logging
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -32,20 +31,22 @@ from a2a.utils import (
     new_task,
 )
 from a2a.utils.errors import ServerError
-from a2ui.a2ui_extension import create_a2ui_part, try_activate_a2ui_extension
 from agent import RestaurantAgent
+
+from a2ui.a2a.extension import try_activate_a2ui_extension
 
 logger = logging.getLogger(__name__)
 
 
 class RestaurantAgentExecutor(AgentExecutor):
-    """Restaurant AgentExecutor Example."""
+    """Restaurant AgentExecutor.
 
-    def __init__(self, base_url: str):
-        # Instantiate two agents: one for UI and one for text-only.
-        # The appropriate one will be chosen at execution time.
-        self.ui_agent = RestaurantAgent(base_url=base_url, use_ui=True)
-        self.text_agent = RestaurantAgent(base_url=base_url, use_ui=False)
+    Negotiates the active A2UI version per request (v0.9 preferred, v0.8
+    fallback) and forwards to the shared RestaurantAgent's per-version runner.
+    """
+
+    def __init__(self, agent: RestaurantAgent):
+        self._agent = agent
 
     async def execute(
         self,
@@ -59,55 +60,72 @@ class RestaurantAgentExecutor(AgentExecutor):
         logger.info(
             f"--- Client requested extensions: {context.requested_extensions} ---"
         )
-        use_ui = try_activate_a2ui_extension(context)
+        active_ui_version = try_activate_a2ui_extension(
+            context, self._agent.agent_card
+        )
 
-        # Determine which agent to use based on whether the a2ui extension is active.
-        if use_ui:
-            agent = self.ui_agent
+        if active_ui_version:
             logger.info(
-                "--- AGENT_EXECUTOR: A2UI extension is active. Using UI agent. ---"
+                "--- AGENT_EXECUTOR: A2UI extension is active"
+                f" (v{active_ui_version}). Using UI agent. ---"
             )
         else:
-            agent = self.text_agent
             logger.info(
-                "--- AGENT_EXECUTOR: A2UI extension is not active. Using text agent. ---"
+                "--- AGENT_EXECUTOR: A2UI extension is not active."
+                " Using text agent. ---"
             )
 
         if context.message and context.message.parts:
             logger.info(
-                f"--- AGENT_EXECUTOR: Processing {len(context.message.parts)} message parts ---"
+                f"--- AGENT_EXECUTOR: Processing {len(context.message.parts)}"
+                " message parts ---"
             )
             for i, part in enumerate(context.message.parts):
                 if isinstance(part.root, DataPart):
+                    # Inbound user actions come in as v0.8-shaped {"userAction": ...}
+                    # DataParts even under v0.9 negotiation, matching the Angular
+                    # reference client and @ag-ui/a2a bridge behaviour.
                     if "userAction" in part.root.data:
-                        logger.info(f"  Part {i}: Found a2ui UI ClientEvent payload.")
+                        logger.info(
+                            f"  Part {i}: Found a2ui UI ClientEvent payload."
+                        )
                         ui_event_part = part.root.data["userAction"]
                     else:
-                        logger.info(f"  Part {i}: DataPart (data: {part.root.data})")
+                        logger.info(
+                            f"  Part {i}: DataPart (data: {part.root.data})"
+                        )
                 elif isinstance(part.root, TextPart):
                     logger.info(f"  Part {i}: TextPart (text: {part.root.text})")
                 else:
-                    logger.info(f"  Part {i}: Unknown part type ({type(part.root)})")
+                    logger.info(
+                        f"  Part {i}: Unknown part type ({type(part.root)})"
+                    )
 
         if ui_event_part:
             logger.info(f"Received a2ui ClientEvent: {ui_event_part}")
-            action = ui_event_part.get("actionName")
+            action = ui_event_part.get("name")
             ctx = ui_event_part.get("context", {})
 
             if action == "book_restaurant":
                 restaurant_name = ctx.get("restaurantName", "Unknown Restaurant")
                 address = ctx.get("address", "Address not provided")
                 image_url = ctx.get("imageUrl", "")
-                query = f"USER_WANTS_TO_BOOK: {restaurant_name}, Address: {address}, ImageURL: {image_url}"
-
+                query = (
+                    f"USER_WANTS_TO_BOOK: {restaurant_name}, Address: {address},"
+                    f" ImageURL: {image_url}"
+                )
             elif action == "submit_booking":
                 restaurant_name = ctx.get("restaurantName", "Unknown Restaurant")
                 party_size = ctx.get("partySize", "Unknown Size")
                 reservation_time = ctx.get("reservationTime", "Unknown Time")
                 dietary_reqs = ctx.get("dietary", "None")
                 image_url = ctx.get("imageUrl", "")
-                query = f"User submitted a booking for {restaurant_name} for {party_size} people at {reservation_time} with dietary requirements: {dietary_reqs}. The image URL is {image_url}"
-
+                query = (
+                    f"User submitted a booking for {restaurant_name} for"
+                    f" {party_size} people at {reservation_time} with dietary"
+                    f" requirements: {dietary_reqs}. The image URL is"
+                    f" {image_url}"
+                )
             else:
                 query = f"User submitted an event: {action} with data: {ctx}"
         else:
@@ -117,19 +135,28 @@ class RestaurantAgentExecutor(AgentExecutor):
         logger.info(f"--- AGENT_EXECUTOR: Final query for LLM: '{query}' ---")
 
         task = context.current_task
-
         if not task:
             task = new_task(context.message)
             await event_queue.enqueue_event(task)
         updater = TaskUpdater(event_queue, task.id, task.context_id)
 
-        async for item in agent.stream(query, task.context_id):
+        async for item in self._agent.stream(
+            query, task.context_id, active_ui_version
+        ):
             is_task_complete = item["is_task_complete"]
             if not is_task_complete:
-                await updater.update_status(
-                    TaskState.working,
-                    new_agent_text_message(item["updates"], task.context_id, task.id),
-                )
+                message = None
+                if "parts" in item:
+                    message = new_agent_parts_message(
+                        item["parts"], task.context_id, task.id
+                    )
+                elif "updates" in item:
+                    message = new_agent_text_message(
+                        item["updates"], task.context_id, task.id
+                    )
+
+                if message:
+                    await updater.update_status(TaskState.working, message)
                 continue
 
             final_state = (
@@ -138,42 +165,7 @@ class RestaurantAgentExecutor(AgentExecutor):
                 else TaskState.input_required
             )
 
-            content = item["content"]
-            final_parts = []
-            if "---a2ui_JSON---" in content:
-                logger.info("Splitting final response into text and UI parts.")
-                text_content, json_string = content.split("---a2ui_JSON---", 1)
-
-                if text_content.strip():
-                    final_parts.append(Part(root=TextPart(text=text_content.strip())))
-
-                if json_string.strip():
-                    try:
-                        json_string_cleaned = (
-                            json_string.strip().lstrip("```json").rstrip("```").strip()
-                        )
-                        # The new protocol sends a stream of JSON objects.
-                        # For this example, we'll assume they are sent as a list in the final response.
-                        json_data = json.loads(json_string_cleaned)
-
-                        if isinstance(json_data, list):
-                            logger.info(
-                                f"Found {len(json_data)} messages. Creating individual DataParts."
-                            )
-                            for message in json_data:
-                                final_parts.append(create_a2ui_part(message))
-                        else:
-                            # Handle the case where a single JSON object is returned
-                            logger.info(
-                                "Received a single JSON object. Creating a DataPart."
-                            )
-                            final_parts.append(create_a2ui_part(json_data))
-
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Failed to parse UI JSON: {e}")
-                        final_parts.append(Part(root=TextPart(text=json_string)))
-            else:
-                final_parts.append(Part(root=TextPart(text=content.strip())))
+            final_parts = item["parts"]
 
             logger.info("--- FINAL PARTS TO BE SENT ---")
             for i, part in enumerate(final_parts):

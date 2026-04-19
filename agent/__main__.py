@@ -19,8 +19,6 @@ import click
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
-from a2a.types import AgentCapabilities, AgentCard, AgentSkill
-from a2ui.a2ui_extension import get_a2ui_agent_extension
 from agent import RestaurantAgent
 from agent_executor import RestaurantAgentExecutor
 from dotenv import load_dotenv
@@ -46,50 +44,29 @@ def main(host, port):
         if not os.getenv("GOOGLE_GENAI_USE_VERTEXAI") == "TRUE":
             if not os.getenv("GEMINI_API_KEY"):
                 raise MissingAPIKeyError(
-                    "GEMINI_API_KEY environment variable not set and GOOGLE_GENAI_USE_VERTEXAI is not TRUE."
+                    "GEMINI_API_KEY environment variable not set and"
+                    " GOOGLE_GENAI_USE_VERTEXAI is not TRUE."
                 )
 
-        capabilities = AgentCapabilities(
-            streaming=True,
-            extensions=[get_a2ui_agent_extension()],
-        )
-        skill = AgentSkill(
-            id="find_restaurants",
-            name="Find Restaurants Tool",
-            description="Helps find restaurants based on user criteria (e.g., cuisine, location).",
-            tags=["restaurant", "finder"],
-            examples=["Find me the top 10 chinese restaurants in the US"],
-        )
-
-        # agent_url: internal A2A endpoint (for agent card communication)
+        # agent_url: internal A2A endpoint (used in the agent card).
+        # public_url: external host used for image URLs returned by tools;
+        # on Railway this is the public domain, locally it falls back to agent_url.
         agent_url = f"http://{host}:{port}"
-
-        # public_url: for image URLs in responses (uses Railway domain when deployed)
         railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN")
         if railway_domain:
             public_url = f"https://{railway_domain}"
         else:
             public_url = os.getenv("PUBLIC_URL") or agent_url
 
-        agent_card = AgentCard(
-            name="Restaurant Agent",
-            description="This agent helps find restaurants based on user criteria.",
-            url=agent_url,
-            version="1.0.0",
-            default_input_modes=RestaurantAgent.SUPPORTED_CONTENT_TYPES,
-            default_output_modes=RestaurantAgent.SUPPORTED_CONTENT_TYPES,
-            capabilities=capabilities,
-            skills=[skill],
-        )
-
-        agent_executor = RestaurantAgentExecutor(base_url=public_url)
+        agent = RestaurantAgent(agent_url=agent_url, public_url=public_url)
+        agent_executor = RestaurantAgentExecutor(agent)
 
         request_handler = DefaultRequestHandler(
             agent_executor=agent_executor,
             task_store=InMemoryTaskStore(),
         )
         server = A2AStarletteApplication(
-            agent_card=agent_card, http_handler=request_handler
+            agent_card=agent.agent_card, http_handler=request_handler
         )
         import uvicorn
 
@@ -97,13 +74,13 @@ def main(host, port):
 
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=["http://localhost:5173"],
+            allow_origin_regex=r"http://localhost:\d+",
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
         )
 
-        # Use absolute path based on this script's location
+        # Absolute path so it works regardless of CWD (Railway uses /tmp).
         script_dir = os.path.dirname(os.path.abspath(__file__))
         images_dir = os.path.join(script_dir, "images")
         app.mount("/static", StaticFiles(directory=images_dir), name="static")

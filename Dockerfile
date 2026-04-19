@@ -14,7 +14,6 @@ WORKDIR /app
 
 # -- Python dependencies --
 COPY pyproject.toml ./
-COPY a2ui_extension/ ./a2ui_extension/
 COPY agent/ ./agent/
 RUN uv sync --all-packages && \
     .venv/bin/python -c "import jsonschema; print('jsonschema OK')"
