@@ -16,24 +16,23 @@ const PORT = parseInt(process.env.PORT || "3000", 10);
 
 // --- A2UI extension negotiation patch --------------------------------------
 // @ag-ui/a2a@0.0.6 hard-codes `X-A2A-Extensions: https://a2ui.org/a2a-extension/a2ui/v0.8`
-// on every A2A call, so v0.9-capable agents never get asked for v0.9 surfaces.
-// Override the prototype method with an identical implementation that
-// advertises v0.9 preferred, v0.8 fallback. Drop this shim once @ag-ui/a2a
-// grows a supported extension-list config.
-const A2UI_EXT_URIS = [
-  "https://a2ui.org/a2a-extension/a2ui/v0.9",
-  "https://a2ui.org/a2a-extension/a2ui/v0.8",
-];
+// on every A2A call, via A2AAgent.prototype.initializeExtension which wraps
+// the A2AClient's sendMessage/sendMessageStream with a fetch-header patch.
+// We want different agents on the same runtime to advertise different
+// extension URIs, so we hoist the fetch-header wrapping into a per-client
+// helper (wrapA2AClientWithExtensions) and neuter the prototype method so
+// it doesn't double-wrap. Drop this shim once @ag-ui/a2a ships a supported
+// extension-list config.
+const A2UI_URI_V09 = "https://a2ui.org/a2a-extension/a2ui/v0.9";
+const A2UI_URI_V08 = "https://a2ui.org/a2a-extension/a2ui/v0.8";
 
-A2AAgent.prototype.initializeExtension = function patchedInitializeExtension(
-  client,
-) {
+const wrapA2AClientWithExtensions = (client, extensionUris) => {
   const addExtensionHeader = (headers) => {
     const existing = (headers.get("X-A2A-Extensions") ?? "")
       .split(",")
       .map((v) => v.trim())
       .filter(Boolean);
-    for (const uri of A2UI_EXT_URIS) {
+    for (const uri of extensionUris) {
       if (!existing.includes(uri)) existing.push(uri);
     }
     headers.set("X-A2A-Extensions", existing.join(", "));
@@ -91,7 +90,14 @@ A2AAgent.prototype.initializeExtension = function patchedInitializeExtension(
   if (wrappedResubscribeTask) {
     client.resubscribeTask = wrappedResubscribeTask;
   }
+
+  return client;
 };
+
+// Neuter A2AAgent's built-in initializeExtension so it doesn't re-wrap the
+// A2AClient with v0.8-only extension headers. We handle wrapping explicitly
+// via wrapA2AClientWithExtensions before constructing each A2AAgent.
+A2AAgent.prototype.initializeExtension = function () {};
 // --- A2UI v0.9 DataPart pass-through patch ----------------------------------
 // @ag-ui/a2a@0.0.6's converter only recognises v0.8 op names
 // (beginRendering / surfaceUpdate / dataModelUpdate) on inbound DataParts;
@@ -220,11 +226,25 @@ A2AAgent.prototype.blockingMessage = async function patchedBlockingMessage(
 };
 // --- end patch ---------------------------------------------------------------
 
-const a2aClient = new A2AClient(A2A_AGENT_URL);
-const agent = new A2AAgent({ a2aClient });
+// `default` advertises v0.9 preferred with v0.8 fallback; `v08` advertises
+// v0.8 only. Each has its own A2AClient with its own fetch-header wrapper so
+// the two extension postures don't stomp each other (the header patch still
+// mutates globalThis.fetch per request, but the URIs baked into each wrapper
+// are stable per-client).
+const v09Client = wrapA2AClientWithExtensions(
+  new A2AClient(A2A_AGENT_URL),
+  [A2UI_URI_V09, A2UI_URI_V08],
+);
+const v08Client = wrapA2AClientWithExtensions(
+  new A2AClient(A2A_AGENT_URL),
+  [A2UI_URI_V08],
+);
+
+const agentV09 = new A2AAgent({ a2aClient: v09Client });
+const agentV08 = new A2AAgent({ a2aClient: v08Client });
 
 const runtime = new CopilotRuntime({
-  agents: { default: agent },
+  agents: { default: agentV09, v08: agentV08 },
   runner: new InMemoryAgentRunner(),
 });
 
@@ -255,8 +275,8 @@ app.use(
 app.route("/", copilotApp);
 
 console.log(`AG-UI server listening on port ${PORT}`);
-console.log(`  AG-UI endpoint: http://localhost:${PORT}/api/copilotkit`);
-console.log(`  A2A agent:      ${A2A_AGENT_URL}`);
-console.log(`  A2UI extensions requested: ${A2UI_EXT_URIS.join(", ")}`);
+console.log(`  A2A agent: ${A2A_AGENT_URL}`);
+console.log(`  default (v0.9+v0.8): http://localhost:${PORT}/api/copilotkit/agent/default/run`);
+console.log(`  v08 (v0.8 only):     http://localhost:${PORT}/api/copilotkit/agent/v08/run`);
 
 serve({ fetch: app.fetch, port: PORT });
