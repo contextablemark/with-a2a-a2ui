@@ -221,6 +221,16 @@ class RestaurantAgent:
         elif "base_url" not in session.state:
             session.state["base_url"] = self.public_url
 
+        # One-shot interstitial. Under v0.9 subsequent yields are `parts`
+        # DataParts and the LLM no longer emits a prose prefix (the
+        # schema-manager prompt wraps output in <a2ui-json>…</a2ui-json>),
+        # so without this the client sees nothing between RUN_STARTED and
+        # the first surface snapshot 4-8 s later.
+        yield {
+            "is_task_complete": False,
+            "updates": self.get_processing_message(),
+        }
+
         max_retries = 1
         attempt = 0
         current_query_text = query
