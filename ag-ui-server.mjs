@@ -7,7 +7,7 @@ import {
   createCopilotEndpoint,
   InMemoryAgentRunner,
 } from "@copilotkit/runtime/v2";
-import { A2AAgent } from "@ag-ui/a2a";
+import { A2AAgent, convertA2AEventToAGUIEvents } from "@ag-ui/a2a";
 import { A2AClient } from "@a2a-js/sdk/client";
 
 const A2A_AGENT_URL =
@@ -91,6 +91,132 @@ A2AAgent.prototype.initializeExtension = function patchedInitializeExtension(
   if (wrappedResubscribeTask) {
     client.resubscribeTask = wrappedResubscribeTask;
   }
+};
+// --- A2UI v0.9 DataPart pass-through patch ----------------------------------
+// @ag-ui/a2a@0.0.6's converter only recognises v0.8 op names
+// (beginRendering / surfaceUpdate / dataModelUpdate) on inbound DataParts;
+// v0.9 envelopes ({version:"v0.9", createSurface:{…}} etc.) are silently
+// dropped. Override streamMessage / blockingMessage to additionally emit an
+// ACTIVITY_SNAPSHOT per v0.9 DataPart with the raw envelope as `content` so
+// a2ui-4k-v0.9 clients can pass it straight to SurfaceStateManager.processMessage.
+// The stock converter still runs first and handles text, tool calls, and any
+// v0.8 a2ui ops exactly as before. Drop this shim once @ag-ui/a2a natively
+// supports v0.9.
+const A2UI_V09_OP_NAMES = [
+  "createSurface",
+  "updateComponents",
+  "updateDataModel",
+  "deleteSurface",
+];
+
+const extractV09SurfaceOp = (data) => {
+  if (!data || typeof data !== "object") return null;
+  if (data.version !== "v0.9") return null;
+  for (const op of A2UI_V09_OP_NAMES) {
+    const inner = data[op];
+    if (
+      inner &&
+      typeof inner === "object" &&
+      typeof inner.surfaceId === "string" &&
+      inner.surfaceId.length > 0
+    ) {
+      return { surfaceId: inner.surfaceId, envelope: data };
+    }
+  }
+  return null;
+};
+
+const extractParts = (event) => {
+  if (!event || typeof event !== "object") return [];
+  if (event.kind === "message") return event.parts ?? [];
+  if (event.kind === "status-update") return event.status?.message?.parts ?? [];
+  if (event.kind === "artifact-update") return event.artifact?.parts ?? [];
+  return [];
+};
+
+const emitV09SnapshotsFor = (event, subscriber) => {
+  for (const part of extractParts(event)) {
+    if (part.kind !== "data") continue;
+    const op = extractV09SurfaceOp(part.data);
+    if (!op) continue;
+    subscriber.next({
+      type: "ACTIVITY_SNAPSHOT",
+      messageId: op.surfaceId,
+      activityType: "a2ui-surface",
+      content: op.envelope,
+      replace: false,
+    });
+  }
+};
+
+const buildConverterContext = function (tracker, aggregatedText) {
+  return {
+    role: "assistant",
+    messageIdMap: this.messageIdMap,
+    onTextDelta: ({ messageId, delta }) => {
+      aggregatedText.set(
+        messageId,
+        (aggregatedText.get(messageId) ?? "") + delta,
+      );
+    },
+    getCurrentText: (id) => aggregatedText.get(id),
+    source: "a2a",
+    surfaceTracker: tracker,
+  };
+};
+
+A2AAgent.prototype.streamMessage = async function patchedStreamMessage(
+  sendParams,
+  subscriber,
+  surfaceTracker,
+) {
+  const aggregatedText = new Map();
+  const rawEvents = [];
+  const tracker = surfaceTracker ?? this.createSurfaceTracker();
+
+  const stream = this.a2aClient.sendMessageStream(sendParams);
+  for await (const event of stream) {
+    rawEvents.push(event);
+
+    const aguiEvents = convertA2AEventToAGUIEvents(
+      event,
+      buildConverterContext.call(this, tracker, aggregatedText),
+    );
+    for (const e of aguiEvents) subscriber.next(e);
+
+    emitV09SnapshotsFor(event, subscriber);
+  }
+
+  return { messages: [], rawEvents };
+};
+
+A2AAgent.prototype.blockingMessage = async function patchedBlockingMessage(
+  sendParams,
+  subscriber,
+  surfaceTracker,
+) {
+  const result = await this.a2aClient.sendMessage(sendParams);
+  if (this.a2aClient.isErrorResponse(result)) {
+    const msg = result.error?.message ?? "Unknown error from A2A agent";
+    console.error("A2A sendMessage error", result.error);
+    throw new Error(msg);
+  }
+
+  const aggregatedText = new Map();
+  const rawEvents = [];
+  const tracker = surfaceTracker ?? this.createSurfaceTracker();
+  const event = result.result;
+  rawEvents.push(event);
+
+  const aguiEvents = convertA2AEventToAGUIEvents(
+    event,
+    buildConverterContext.call(this, tracker, aggregatedText),
+  );
+  for (const e of aguiEvents) subscriber.next(e);
+
+  emitV09SnapshotsFor(event, subscriber);
+
+  return { messages: [], rawEvents };
 };
 // --- end patch ---------------------------------------------------------------
 
