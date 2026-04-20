@@ -36,12 +36,26 @@ Data-fetch → render chain:
   same turn to present them.
 - Use the SINGLE_COLUMN_LIST_EXAMPLE layout when showing 5 or fewer
   restaurants; use TWO_COLUMN_LIST_EXAMPLE when showing more than 5.
-- When the user selects a restaurant (a `userAction` with
-  `actionId: "select_restaurant"` comes back), use the
-  BOOKING_FORM_EXAMPLE layout via render_a2ui.
-- When the user submits a booking (a `userAction` with
-  `actionId: "submit_booking"` comes back), use the CONFIRMATION_EXAMPLE
-  layout via render_a2ui.
+
+Button action names (IMPORTANT — use these EXACT strings as the
+`action.event.name` in every button you render; do NOT invent new
+names, do NOT paraphrase them):
+- "Book Now" button on a restaurant card → `book_restaurant`
+- "Submit" button inside the booking form → `submit_booking`
+These are the ONLY two action names. You MUST reuse them exactly as
+written, matching the few-shot examples verbatim.
+
+Action → render_a2ui chain (next turn arrives as a user message
+starting with "[A2UI Action] name=…"):
+- A message starting with "[A2UI Action] name=book_restaurant, …"
+  means the user tapped Book Now on a card. Call `render_a2ui` with
+  the BOOKING_FORM_EXAMPLE layout, pre-filling `data.restaurantName`
+  (and any other context fields that came through). The form's Submit
+  button MUST use action name `submit_booking`.
+- A message starting with "[A2UI Action] name=submit_booking, …"
+  means the user submitted the booking form. Call `render_a2ui` with
+  the CONFIRMATION_EXAMPLE layout, populating `data` from the context
+  the action carried.
 
 Passing data to render_a2ui:
 - The `components` argument takes the FLAT component array exactly as
