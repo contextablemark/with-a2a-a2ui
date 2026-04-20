@@ -116,23 +116,7 @@ _CACHED_INSTRUCTION = _build_instruction()
 
 def build_agent() -> LlmAgent:
     return LlmAgent(
-        # `reasoning_effort="disable"` turns off Gemini thinking mode
-        # (`includeThoughts: false` in GenerationConfig).
-        #
-        # Why: with thinking on, Gemini embeds an ephemeral thought
-        # signature into tool_call_ids via a `__thought__<base64>`
-        # suffix. The suffix differs between the streamed (client-
-        # facing) and persisted (server-facing) events for the same
-        # call, so ag_ui_adk's pending-tool-call list stores one id
-        # while the client sends back a tool result with a different
-        # id. The comparison fails ("Skipping tool result batch - no
-        # matching pending tool calls"), leaving the second turn with
-        # nothing to do. Disabling thoughts drops the suffix and makes
-        # ids stable across the round trip.
-        model=LiteLlm(
-            model=os.getenv("LITELLM_MODEL", "gemini/gemini-2.5-flash"),
-            reasoning_effort="disable",
-        ),
+        model=LiteLlm(model=os.getenv("LITELLM_MODEL", "gemini/gemini-2.5-flash")),
         name="restaurant_agent",
         description="Finds restaurants and helps book tables.",
         instruction=lambda _ctx: _CACHED_INSTRUCTION,
