@@ -13,10 +13,42 @@ members = [
 ]
 
 [[package]]
+name = "a2a-sdk"
+version = "0.3.26"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-api-core" },
+    { name = "httpx" },
+    { name = "httpx-sse" },
+    { name = "protobuf" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/be/97/a6840e01795b182ce751ca165430d46459927cde9bfab838087cbb24aef7/a2a_sdk-0.3.26.tar.gz", hash = "sha256:44068e2d037afbb07ab899267439e9bc7eaa7ac2af94f1e8b239933c993ad52d", size = 274598, upload-time = "2026-04-09T15:21:13.902Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dd/d5/51f4ee1bf3b736add42a542d3c8a3fd3fa85f3d36c17972127defc46c26f/a2a_sdk-0.3.26-py3-none-any.whl", hash = "sha256:754e0573f6d33b225c1d8d51f640efa69cbbed7bdfb06ce9c3540ea9f58d4a91", size = 151016, upload-time = "2026-04-09T15:21:12.35Z" },
+]
+
+[[package]]
+name = "a2ui-agent-sdk"
+version = "0.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "a2a-sdk" },
+    { name = "google-adk" },
+    { name = "google-genai" },
+    { name = "jsonschema" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8f/a1/66106b413acf22a7531e86d9ce6663e33d8bdead5043f15cbed6e22a427f/a2ui_agent_sdk-0.2.1.tar.gz", hash = "sha256:cc42af7a1cdae5ef7b7c90a619a7497b677038558a4273c7f751e843c41fac04", size = 233418, upload-time = "2026-04-10T00:18:43.387Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5b/21/6a10fa0e20db25825f384a6147a11fb521bb5471e2082dc9f4b471d1e3b4/a2ui_agent_sdk-0.2.1-py3-none-any.whl", hash = "sha256:36157834654c591dbe11c40131a51c9f9b54bdedcb15e789cb33eedbefddbc03", size = 73369, upload-time = "2026-04-10T00:18:41.878Z" },
+]
+
+[[package]]
 name = "a2ui-restaurant-finder"
 version = "0.1.0"
 source = { editable = "agent" }
 dependencies = [
+    { name = "a2ui-agent-sdk" },
     { name = "ag-ui-adk" },
     { name = "click" },
     { name = "fastapi" },
@@ -29,6 +61,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "a2ui-agent-sdk", specifier = ">=0.2.1" },
     { name = "ag-ui-adk", specifier = ">=0.6.0" },
     { name = "click", specifier = ">=8.1.8" },
     { name = "fastapi", specifier = ">=0.115.0" },
