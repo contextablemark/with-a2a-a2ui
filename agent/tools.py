@@ -16,12 +16,21 @@ import json
 import logging
 import os
 
-from google.adk.tools.tool_context import ToolContext
-
 logger = logging.getLogger(__name__)
 
 
-def get_restaurants(cuisine: str, location: str,  tool_context: ToolContext, count: int = 5) -> str:
+def _public_base_url() -> str:
+    """Host under which the browser/client fetches `/static/*` images.
+
+    On Railway the domain is provided; locally fall back to the port the
+    Node runtime serves on (images are mounted at /static/ there).
+    """
+    if domain := os.getenv("RAILWAY_PUBLIC_DOMAIN"):
+        return f"https://{domain}"
+    return os.getenv("PUBLIC_URL") or f"http://localhost:{os.getenv('PORT', '3000')}"
+
+
+def get_restaurants(cuisine: str, location: str, count: int = 5) -> str:
     """Call this tool to get a list of restaurants based on a cuisine and location.
     'count' is the number of restaurants to return.
     """
@@ -36,17 +45,15 @@ def get_restaurants(cuisine: str, location: str,  tool_context: ToolContext, cou
             file_path = os.path.join(script_dir, "restaurant_data.json")
             with open(file_path) as f:
                 restaurant_data_str = f.read()
-                if base_url := tool_context.state.get("base_url"):                    
-                    restaurant_data_str = restaurant_data_str.replace("http://localhost:10002", base_url)
-                    logger.info(f'Updated base URL from tool context: {base_url}')
-                all_items = json.loads(restaurant_data_str)        
-
-            # Slice the list to return only the requested number of items
+            base_url = _public_base_url()
+            restaurant_data_str = restaurant_data_str.replace(
+                "http://localhost:10002", base_url
+            )
+            all_items = json.loads(restaurant_data_str)
             items = all_items[:count]
             logger.info(
                 f"  - Success: Found {len(all_items)} restaurants, returning {len(items)}."
             )
-
         except FileNotFoundError:
             logger.error(f"  - Error: restaurant_data.json not found at {file_path}")
         except json.JSONDecodeError:

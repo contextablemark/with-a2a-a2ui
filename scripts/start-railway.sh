@@ -1,28 +1,31 @@
 #!/bin/bash
 set -e
 
-echo "Starting Python A2A agent on port 10002..."
-# Run from inside agent/ dir so sibling imports (agent.py, agent_executor.py) resolve
-# correctly — same as local 'uv run .' from agent/
-cd /app/agent && python __main__.py --host 0.0.0.0 --port 10002 &
+AGENT_PORT=${AGENT_PORT:-8000}
+export AGENT_URL="http://localhost:${AGENT_PORT}/"
+
+echo "Starting AG-UI Python agent on port ${AGENT_PORT}..."
+# Run from inside agent/ dir so sibling imports (agent.py, tools.py) resolve
+# the same way as local 'uv run .' from agent/.
+cd /app/agent && python __main__.py --host 0.0.0.0 --port "${AGENT_PORT}" &
 AGENT_PID=$!
 
-# Wait for the A2A agent to be ready
-echo "Waiting for A2A agent..."
+# Wait for the Python agent's /health to come up before we accept client traffic.
+echo "Waiting for AG-UI agent..."
 for i in $(seq 1 30); do
-  if curl -sf http://localhost:10002/.well-known/agent.json > /dev/null 2>&1; then
-    echo "A2A agent is ready."
+  if curl -sf "http://localhost:${AGENT_PORT}/health" > /dev/null 2>&1; then
+    echo "AG-UI agent is ready."
     break
   fi
   if ! kill -0 $AGENT_PID 2>/dev/null; then
-    echo "A2A agent process died."
+    echo "AG-UI agent process died."
     exit 1
   fi
   sleep 1
 done
 
-if ! curl -sf http://localhost:10002/.well-known/agent.json > /dev/null 2>&1; then
-  echo "A2A agent failed to start within 30 seconds."
+if ! curl -sf "http://localhost:${AGENT_PORT}/health" > /dev/null 2>&1; then
+  echo "AG-UI agent failed to start within 30 seconds."
   exit 1
 fi
 

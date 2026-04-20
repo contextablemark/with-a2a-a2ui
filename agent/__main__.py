@@ -12,18 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Pure AG-UI entrypoint for the restaurant agent.
+
+Exposes the ADK LlmAgent as an AG-UI HTTP endpoint via `ag_ui_adk`.
+The Node CopilotRuntime in front of this process adds the `render_a2ui`
+tool and A2UI middleware; this server only needs to run the LLM and
+stream standard AG-UI events (TEXT_MESSAGE_*, TOOL_CALL_*).
+"""
+
 import logging
 import os
 
 import click
-from a2a.server.apps import A2AStarletteApplication
-from a2a.server.request_handlers import DefaultRequestHandler
-from a2a.server.tasks import InMemoryTaskStore
-from agent import RestaurantAgent
-from agent_executor import RestaurantAgentExecutor
+import uvicorn
+from ag_ui_adk import ADKAgent, add_adk_fastapi_endpoint
+from agent import build_agent
 from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
-from starlette.staticfiles import StaticFiles
+from fastapi import FastAPI
 
 load_dotenv()
 
@@ -36,11 +41,10 @@ class MissingAPIKeyError(Exception):
 
 
 @click.command()
-@click.option("--host", default="localhost")
-@click.option("--port", default=10002)
-def main(host, port):
+@click.option("--host", default="0.0.0.0")
+@click.option("--port", default=8000, type=int)
+def main(host: str, port: int) -> None:
     try:
-        # Check for API key only if Vertex AI is not configured
         if not os.getenv("GOOGLE_GENAI_USE_VERTEXAI") == "TRUE":
             if not os.getenv("GEMINI_API_KEY"):
                 raise MissingAPIKeyError(
@@ -48,42 +52,19 @@ def main(host, port):
                     " GOOGLE_GENAI_USE_VERTEXAI is not TRUE."
                 )
 
-        # agent_url: internal A2A endpoint (used in the agent card).
-        # public_url: external host used for image URLs returned by tools;
-        # on Railway this is the public domain, locally it falls back to agent_url.
-        agent_url = f"http://{host}:{port}"
-        railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN")
-        if railway_domain:
-            public_url = f"https://{railway_domain}"
-        else:
-            public_url = os.getenv("PUBLIC_URL") or agent_url
-
-        agent = RestaurantAgent(agent_url=agent_url, public_url=public_url)
-        agent_executor = RestaurantAgentExecutor(agent)
-
-        request_handler = DefaultRequestHandler(
-            agent_executor=agent_executor,
-            task_store=InMemoryTaskStore(),
-        )
-        server = A2AStarletteApplication(
-            agent_card=agent.agent_card, http_handler=request_handler
-        )
-        import uvicorn
-
-        app = server.build()
-
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origin_regex=r"http://localhost:\d+",
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
+        adk_agent = ADKAgent(
+            adk_agent=build_agent(),
+            app_name="restaurant_finder",
+            user_id="client",
         )
 
-        # Absolute path so it works regardless of CWD (Railway uses /tmp).
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        images_dir = os.path.join(script_dir, "images")
-        app.mount("/static", StaticFiles(directory=images_dir), name="static")
+        app = FastAPI()
+
+        @app.get("/health")
+        def health() -> dict:
+            return {"status": "ok"}
+
+        add_adk_fastapi_endpoint(app, adk_agent, path="/")
 
         uvicorn.run(app, host=host, port=port)
     except MissingAPIKeyError as e:

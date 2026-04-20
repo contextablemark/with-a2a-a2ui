@@ -16,7 +16,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY agent/ ./agent/
 RUN uv sync --all-packages && \
-    .venv/bin/python -c "import jsonschema; print('jsonschema OK')"
+    .venv/bin/python -c "import ag_ui_adk; print('ag_ui_adk OK')"
 
 # Put the venv on PATH so we don't need 'uv run' at runtime
 ENV PATH="/app/.venv/bin:$PATH"
