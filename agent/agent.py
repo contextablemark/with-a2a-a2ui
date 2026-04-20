@@ -31,24 +31,16 @@ from tools import get_restaurants
 
 INSTRUCTION = """You help users find restaurants and book tables.
 
-## Absolute rule
+You MUST always present results as an interactive A2UI surface — never as
+plain prose. The `render_a2ui` tool is available in every turn; always
+call it when there is something to show the user. Follow the usage guide
+for `render_a2ui` provided in context exactly.
 
-Every turn in which you have something to show the user, your FINAL
-tool call of the turn MUST be `render_a2ui`. No exceptions. Never end a
-turn with a plain-text reply, a summary, a clarifying question, or a
-tool result alone — always finish by calling `render_a2ui` to present
-the result as an interactive surface. Follow the usage guide for
-`render_a2ui` provided in context exactly.
-
-If `get_restaurants` returned data, your very next action is
-`render_a2ui` — do not think, do not summarise, do not apologise, just
-call it.
-
-## Workflow
+Workflow:
 
 1. User asks for restaurants → call `get_restaurants` with their cuisine
-   and location, then IMMEDIATELY call `render_a2ui` (same turn) to show
-   the list. Each card must have an `action` whose
+   and location. As soon as the result comes back, immediately call
+   `render_a2ui` to show the list. Each card must have an `action` whose
    `userAction.actionId` is `"select_restaurant"` with a `requestBody`
    containing `restaurantName`.
 
@@ -60,12 +52,9 @@ call it.
 3. A `userAction` for `submit_booking` comes back → call `render_a2ui`
    with a confirmation surface summarising the reservation.
 
-## Catalog rules
-
-- Use the v0.9 basic catalog.
-- Root component id MUST be `"root"`.
-- Do not emit prose text alongside surface updates — the UI is the
-  response."""
+Use the v0.9 basic catalog. Root component id must be `"root"`.
+Do not emit prose text alongside surface updates — the UI is the
+response."""
 
 
 def build_agent() -> LlmAgent:
